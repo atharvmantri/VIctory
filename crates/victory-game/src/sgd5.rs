@@ -48,20 +48,24 @@ pub fn records(file: &[u8]) -> impl Iterator<Item = Record<'_>> {
 
 fn record(file: &[u8], at: usize) -> Option<Record<'_>> {
     let u32_at = |o: usize| {
-        file.get(o..o + 4)
+        let end = o.checked_add(4)?;
+        file.get(o..end)
             .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")) as usize)
     };
     let n = u32_at(at.checked_sub(4)?)?;
-    let unpacked_size = u32_at(at + 8)?;
-    if u32_at(at + 4)? != n || n < 12 || unpacked_size > MAX_UNPACKED {
+    let unpacked_size = u32_at(at.checked_add(8)?)?;
+    if u32_at(at.checked_add(4)?)? != n || n < 12 || unpacked_size > MAX_UNPACKED {
         return None;
     }
     let nul = at.checked_sub(6)?;
+    let kind_idx = at.checked_sub(5)?;
     Some(Record {
         offset: at,
-        name: (file[nul] == 0).then(|| name_before(file, nul)).flatten(),
-        kind: file[at - 5],
-        packed: file.get(at + 12..at + n)?,
+        name: (file.get(nul) == Some(&0))
+            .then(|| name_before(file, nul))
+            .flatten(),
+        kind: *file.get(kind_idx)?,
+        packed: file.get(at.checked_add(12)?..at.checked_add(n)?)?,
         unpacked_size,
     })
 }
@@ -132,5 +136,23 @@ mod tests {
         file[27] = 0xFF; // first packed byte: reserved block type
         let r = records(&file).next().unwrap();
         assert_eq!(r.unpack(), None);
+    }
+
+    #[test]
+    fn malformed_and_overflowing_markers_are_ignored() {
+        // Marker at offset 0 (no space for header prefix).
+        let mut truncated = MARKER.to_vec();
+        truncated.extend_from_slice(&[0; 32]);
+        assert_eq!(records(&truncated).count(), 0);
+
+        // Marker with huge overflowing n that would overflow usize addition.
+        let mut overflow = vec![0; 10];
+        let huge_n = u32::MAX;
+        overflow.extend_from_slice(&huge_n.to_le_bytes()); // n
+        overflow.extend_from_slice(&MARKER); // marker
+        overflow.extend_from_slice(&huge_n.to_le_bytes()); // n match
+        overflow.extend_from_slice(&16u32.to_le_bytes()); // unpacked_size
+        overflow.extend_from_slice(&[0; 64]);
+        assert_eq!(records(&overflow).count(), 0);
     }
 }
